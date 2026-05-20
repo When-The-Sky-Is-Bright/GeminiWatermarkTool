@@ -18,6 +18,7 @@
 #include "cli/cli_app.hpp"
 #include "core/watermark_engine.hpp"
 #include "utils/ascii_logo.hpp"
+#include "utils/image_io.hpp"
 #include "utils/path_formatter.hpp"
 #include "embedded_assets.hpp"
 
@@ -259,12 +260,14 @@ void process_single(
     bool remove,
     WatermarkEngine& engine,
     std::optional<WatermarkSize> force_size,
+    std::optional<WatermarkVariant> force_variant,
     bool use_detection,
     float detection_threshold,
     BatchResult& result
 ) {
     auto proc_result = process_image(input, output, remove, engine,
-                                     force_size, use_detection, detection_threshold);
+                                     force_size, use_detection, detection_threshold,
+                                     force_variant);
 
     if (proc_result.skipped) {
         result.skipped++;
@@ -305,6 +308,7 @@ void process_single_advanced(
     const fs::path& output,
     WatermarkEngine& engine,
     std::optional<WatermarkSize> force_size,
+    std::optional<WatermarkVariant> force_variant,
     bool use_detection,
     float detection_threshold,
     bool force_process,
@@ -356,21 +360,27 @@ void process_single_advanced(
         bool skip_standard_detect = (force_process && !explicit_region.empty()) ||
                                     (!fallback_region_str.empty() && use_snap);
 
+        // Track which variant the detector (or force flag) selected, so all
+        // subsequent position lookups stay consistent within this image.
+        WatermarkVariant active_variant = force_variant.value_or(WatermarkVariant::V2);
+
         if (use_detection && !skip_standard_detect) {
-            DetectionResult det = engine.detect_watermark(image, force_size);
+            DetectionResult det = engine.detect_watermark(image, force_size, force_variant);
             confidence = det.confidence;
 
             if (det.detected || det.confidence >= detection_threshold) {
+                active_variant = det.variant;
                 // Standard detection succeeded
-                auto config = get_watermark_config(img_w, img_h);
+                auto config = get_watermark_config(img_w, img_h, active_variant);
                 auto pos = config.get_position(img_w, img_h);
                 wm_region = cv::Rect(pos.x, pos.y, config.logo_size, config.logo_size);
                 detected = true;
 
-                spdlog::info("Detected ({:.0f}%), region: ({},{}) {}x{}",
+                spdlog::info("Detected ({:.0f}%), region: ({},{}) {}x{} [profile {}]",
                              confidence * 100.0f,
                              wm_region.x, wm_region.y,
-                             wm_region.width, wm_region.height);
+                             wm_region.width, wm_region.height,
+                             active_variant == WatermarkVariant::V1 ? "V1" : "V2");
             }
         }
 
@@ -384,11 +394,12 @@ void process_single_advanced(
                              wm_region.x, wm_region.y,
                              wm_region.width, wm_region.height);
             } else if (force_process) {
-                // --force without region: use standard position
-                auto config = get_watermark_config(img_w, img_h);
+                // --force without region: use standard position for active variant
+                auto config = get_watermark_config(img_w, img_h, active_variant);
                 auto pos = config.get_position(img_w, img_h);
                 wm_region = cv::Rect(pos.x, pos.y, config.logo_size, config.logo_size);
-                spdlog::info("Force mode: using default position");
+                spdlog::info("Force mode: using default position [profile {}]",
+                             active_variant == WatermarkVariant::V1 ? "V1" : "V2");
             } else if (!fallback_region_str.empty()) {
                 // Fallback region: parse and optionally snap
                 cv::Rect fb_region = parse_region(fallback_region_str, img_w, img_h);
@@ -475,9 +486,9 @@ void process_single_advanced(
         // =================================================================
 
         if (using_custom) {
-            engine.remove_watermark_custom(image, wm_region);
+            engine.remove_watermark_custom(image, wm_region, active_variant);
         } else {
-            engine.remove_watermark(image, force_size);
+            engine.remove_watermark(image, force_size, active_variant);
         }
 
         // =================================================================
@@ -487,7 +498,7 @@ void process_single_advanced(
         if (denoise_cfg.enabled) {
 #ifdef GWT_HAS_AI_DENOISE
             if (denoise_cfg.method == InpaintMethod::AI_DENOISE && denoiser && denoiser->is_ready()) {
-                const auto& alpha = engine.get_alpha_map(WatermarkSize::Large);
+                const auto& alpha = engine.get_alpha_map(WatermarkSize::Large, active_variant);
                 denoiser->denoise(
                     image, wm_region, alpha,
                     denoise_cfg.sigma, denoise_cfg.strength, 32);
@@ -522,7 +533,10 @@ void process_single_advanced(
             params = {cv::IMWRITE_WEBP_QUALITY, 101};
         }
 
-        if (!cv::imwrite(output.string(), image, params)) {
+        bool write_ok = (ext == ".png")
+            ? gwt::write_png(output, image, 6)
+            : cv::imwrite(output.string(), image, params);
+        if (!write_ok) {
             result.failed++;
             fmt::print(fmt::fg(fmt::color::red), "[FAIL] ");
             fmt::print("{}: Failed to write\n", gwt::filename_utf8(input));
@@ -643,8 +657,10 @@ int run_simple_mode(int argc, char** argv) {
 
     try {
         WatermarkEngine engine(
-            embedded::bg_48_png, embedded::bg_48_png_size,
-            embedded::bg_96_png, embedded::bg_96_png_size
+            embedded::bg_48_png,   embedded::bg_48_png_size,
+            embedded::bg_96_png,   embedded::bg_96_png_size,
+            embedded::bg_b_36_png, embedded::bg_b_36_png_size,
+            embedded::bg_b_96_png, embedded::bg_b_96_png_size
         );
 
         for (int i = 1; i < argc; ++i) {
@@ -676,7 +692,7 @@ int run_simple_mode(int argc, char** argv) {
                 continue;
             }
 
-            process_single(input, input, true, engine, std::nullopt,
+            process_single(input, input, true, engine, std::nullopt, std::nullopt,
                           use_detection, detection_threshold, result);
         }
 
@@ -732,6 +748,13 @@ int run(int argc, char** argv) {
     bool force_process = false;
     app.add_flag("--force,-f", force_process,
                  "Force processing without watermark detection (may damage images without watermarks)");
+
+    // Pin watermark profile to legacy. Default behaviour processes images
+    // produced by the current Gemini profile; the legacy profile covers
+    // outputs from versions before Gemini 3.5.
+    bool legacy_variant = false;
+    app.add_flag("--legacy", legacy_variant,
+                 "Pin watermark profile to legacy (pre-Gemini 3.5 outputs)");
 
     // Detection threshold
     float detection_threshold = 0.25f;
@@ -848,6 +871,12 @@ int run(int argc, char** argv) {
         spdlog::info("Forcing 96x96 watermark size");
     }
 
+    std::optional<WatermarkVariant> force_variant;
+    if (legacy_variant) {
+        force_variant = WatermarkVariant::V1;
+        spdlog::info("Pinned to legacy watermark profile (--legacy)");
+    }
+
     // Build denoise config
     DenoiseConfig denoise_cfg;
     if (!denoise_method_str.empty()) {
@@ -898,8 +927,10 @@ int run(int argc, char** argv) {
 
     try {
         WatermarkEngine engine(
-            embedded::bg_48_png, embedded::bg_48_png_size,
-            embedded::bg_96_png, embedded::bg_96_png_size
+            embedded::bg_48_png,   embedded::bg_48_png_size,
+            embedded::bg_96_png,   embedded::bg_96_png_size,
+            embedded::bg_b_36_png, embedded::bg_b_36_png_size,
+            embedded::bg_b_96_png, embedded::bg_b_96_png_size
         );
 
 #ifdef GWT_HAS_AI_DENOISE
@@ -954,7 +985,7 @@ int run(int argc, char** argv) {
 
                 if (advanced) {
                     process_single_advanced(
-                        entry.path(), out_file, engine, force_size,
+                        entry.path(), out_file, engine, force_size, force_variant,
                         use_detection, detection_threshold, force_process,
                         region_str, fallback_region_str,
                         use_snap, snap_min_size, snap_max_size, snap_threshold, denoise_cfg,
@@ -964,7 +995,8 @@ int run(int argc, char** argv) {
                         result);
                 } else {
                     process_single(entry.path(), out_file, remove_mode, engine,
-                                  force_size, use_detection, detection_threshold, result);
+                                  force_size, force_variant, use_detection,
+                                  detection_threshold, result);
                 }
             }
 
@@ -972,7 +1004,7 @@ int run(int argc, char** argv) {
         } else {
             if (advanced) {
                 process_single_advanced(
-                    input, output, engine, force_size,
+                    input, output, engine, force_size, force_variant,
                     use_detection, detection_threshold, force_process,
                     region_str, fallback_region_str,
                     use_snap, snap_min_size, snap_max_size, snap_threshold, denoise_cfg,
@@ -982,7 +1014,8 @@ int run(int argc, char** argv) {
                     result);
             } else {
                 process_single(input, output, remove_mode, engine,
-                              force_size, use_detection, detection_threshold, result);
+                              force_size, force_variant, use_detection,
+                              detection_threshold, result);
             }
         }
 
