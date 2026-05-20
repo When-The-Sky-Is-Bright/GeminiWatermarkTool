@@ -7,6 +7,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![GitHub Stars](https://img.shields.io/github/stars/allenk/GeminiWatermarkTool?style=social)](https://github.com/allenk/GeminiWatermarkTool)
 
+🆕 **Gemini 3.5 watermark profile supported** — Google updated the watermark layout (different position and alpha map) starting with Gemini 3.5. This tool now auto-targets the new profile by default, with a one-click **Legacy** toggle for pre-3.5 outputs. [Details below](#-gemini-35-support--new).
+
 📢 **Now available: [Veo Video Watermark Remover](https://github.com/allenk/VeoWatermarkRemover)** — remove Google Veo "Veo" text watermarks from videos, same reverse alpha blending engine. Demo build (Win x64).
 
 ▶️ **Watch: [GeminiWatermarkTool — Quick Start & Feature Overview](https://www.youtube.com/watch?v=0jux3AJVb2Q)**
@@ -46,6 +48,24 @@ Key capabilities include:
 - **Batch processing**: process entire directories with preview and progress tracking
 - **Cross-platform**: Windows / Linux / macOS / Android (CLI)
 - **AI Agent ready**: [Claude Code Skill + MCP Server](https://github.com/allenk/gwt-integrations) for automation and agent workflows
+
+## ✨ Gemini 3.5 Support — New
+
+> **GeminiWatermarkTool now supports the new Gemini 3.5 watermark layout out of the box.**
+> Starting with Gemini 3.5, Google shifted the watermark position and updated its alpha map relative to legacy Gemini outputs. The tool targets the new profile by default and ships a one-click **Legacy** toggle for pre-3.5 outputs — no command-line flags or re-calibration needed.
+
+![Gemini 3.5 Preview](artworks/gemini_35_preview.png)
+
+| | Gemini 3.5+ (default) | Legacy (pre-Gemini 3.5) |
+|---|---|---|
+| **Profile** | V2 | V1 |
+| **Small logo** | 36×36 | 48×48 |
+| **Large logo** | 96×96 | 96×96 |
+| **Margin** | shifted (per-aspect calibrated) | original |
+| **GUI** | "Auto Detect" / "Small" / "Large" radios | tick **"Legacy (pre-Gemini 3.5)"** checkbox |
+| **CLI** | default | pass `--legacy` |
+
+Both profiles use the same deterministic reverse alpha blending pipeline — switching profiles only changes the alpha map and position formula, not the math.
 
 ## 🎬 Veo Video Watermark Removal — Demo Available
 
