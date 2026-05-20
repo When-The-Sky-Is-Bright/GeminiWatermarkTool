@@ -8,14 +8,17 @@
 #include "gui/app/app_controller.hpp"
 #include "core/watermark_detector.hpp"
 #include "embedded_assets.hpp"
+#include "utils/image_io.hpp"
 #include "utils/path_formatter.hpp"
 
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 #include <spdlog/spdlog.h>
 #include <fmt/core.h>
+#include <fmt/format.h>
 
 #include <algorithm>
+#include <cctype>
 
 namespace gwt::gui {
 
@@ -28,8 +31,10 @@ AppController::AppController(IRenderBackend& backend)
 {
     // Initialize watermark engine with embedded assets
     m_engine = std::make_unique<WatermarkEngine>(
-        embedded::bg_48_png, embedded::bg_48_png_size,
-        embedded::bg_96_png, embedded::bg_96_png_size
+        embedded::bg_48_png,   embedded::bg_48_png_size,
+        embedded::bg_96_png,   embedded::bg_96_png_size,
+        embedded::bg_b_36_png, embedded::bg_b_36_png_size,
+        embedded::bg_b_96_png, embedded::bg_b_96_png_size
     );
 
 #ifdef GWT_HAS_AI_DENOISE
@@ -193,7 +198,8 @@ void AppController::process_current() {
             if (is_custom) {
                 m_engine->remove_watermark_custom(
                     m_state.image.processed,
-                    effective_region
+                    effective_region,
+                    m_state.process_options.variant()
                 );
                 spdlog::info("Watermark removed (custom region: ({},{}) {}x{})",
                              effective_region.x, effective_region.y,
@@ -201,7 +207,8 @@ void AppController::process_current() {
             } else {
                 m_engine->remove_watermark(
                     m_state.image.processed,
-                    m_state.process_options.force_size
+                    m_state.process_options.force_size,
+                    m_state.process_options.variant()
                 );
                 spdlog::info("Watermark removed");
             }
@@ -216,7 +223,8 @@ void AppController::process_current() {
                 } else {
                     // Standard mode: use the detected watermark position
                     auto config = get_watermark_config(
-                        m_state.image.width, m_state.image.height);
+                        m_state.image.width, m_state.image.height,
+                        m_state.process_options.variant());
                     auto pos = config.get_position(
                         m_state.image.width, m_state.image.height);
                     inpaint_region = cv::Rect(
@@ -226,7 +234,8 @@ void AppController::process_current() {
 #ifdef GWT_HAS_AI_DENOISE
                 if (inpaint_opts.method == InpaintMethod::AI_DENOISE && m_denoiser) {
                     // Get alpha map for gradient mask computation
-                    const auto& alpha = m_engine->get_alpha_map(WatermarkSize::Large);
+                    const auto& alpha = m_engine->get_alpha_map(
+                        WatermarkSize::Large, m_state.process_options.variant());
                     m_denoiser->denoise(
                         m_state.image.processed,
                         inpaint_region,
@@ -330,7 +339,7 @@ void AppController::set_force_size(std::optional<WatermarkSize> size) {
             ? WatermarkSizeMode::Small
             : WatermarkSizeMode::Large;
         spdlog::debug("Force size: {}",
-                      *size == WatermarkSize::Small ? "48x48" : "96x96");
+                      *size == WatermarkSize::Small ? "Small" : "Large");
     } else {
         m_state.process_options.size_mode = WatermarkSizeMode::Auto;
         spdlog::debug("Force size: Auto");
@@ -376,6 +385,18 @@ void AppController::set_size_mode(WatermarkSizeMode mode) {
     }
 
     spdlog::debug("Size mode set to: {}", static_cast<int>(mode));
+}
+
+void AppController::set_legacy_mode(bool legacy) {
+    if (m_state.process_options.legacy_mode == legacy) return;
+    m_state.process_options.legacy_mode = legacy;
+    // Custom snap state is profile-dependent; reset so a stale snap from
+    // the other profile doesn't bleed over.
+    m_state.custom_watermark.clear_snap();
+    if (m_state.image.has_image()) {
+        update_watermark_info();
+    }
+    spdlog::debug("Legacy mode: {}", legacy ? "on" : "off");
 }
 
 void AppController::set_custom_region(const cv::Rect& region) {
@@ -640,32 +661,16 @@ bool AppController::process_batch_next() {
     auto& file_result = m_state.batch.files[m_state.batch.current_index];
     file_result.status = BatchFileStatus::Processing;
 
-    const auto& input = file_result.path;
+    // Batch processes files through the same pipeline the single-image GUI uses:
+    // detect -> remove -> inpaint (per process_options.inpaint) -> save. The
+    // CLI simple mode by contrast runs detect+remove only, by design.
+    process_batch_file(file_result);
 
-    // Output = overwrite original (same as CLI simple mode)
-    std::filesystem::path output = input;
-
-    // Process using core process_image with detection
-    auto proc_result = process_image(
-        input, output,
-        m_state.process_options.remove_mode,
-        *m_engine,
-        m_state.process_options.force_size,
-        m_state.batch.use_detection,
-        m_state.batch.detection_threshold
-    );
-
-    file_result.confidence = proc_result.confidence;
-    file_result.message = proc_result.message;
-
-    if (proc_result.skipped) {
-        file_result.status = BatchFileStatus::Skipped;
+    if (file_result.status == BatchFileStatus::Skipped) {
         m_state.batch.skip_count++;
-    } else if (proc_result.success) {
-        file_result.status = BatchFileStatus::OK;
+    } else if (file_result.status == BatchFileStatus::OK) {
         m_state.batch.success_count++;
     } else {
-        file_result.status = BatchFileStatus::Failed;
         m_state.batch.fail_count++;
     }
 
@@ -682,6 +687,131 @@ bool AppController::process_batch_next() {
 
 void AppController::cancel_batch() {
     m_state.batch.cancel_requested = true;
+}
+
+void AppController::process_batch_file(BatchFileResult& result) {
+    const auto& input = result.path;
+
+    auto fail = [&](std::string msg) {
+        result.status = BatchFileStatus::Failed;
+        result.message = std::move(msg);
+        spdlog::error("Batch: {}: {}", input.filename(), result.message);
+    };
+
+    cv::Mat image;
+    try {
+        image = cv::imread(input.string(), cv::IMREAD_COLOR);
+    } catch (const std::exception& e) {
+        fail(std::string("Read error: ") + e.what());
+        return;
+    }
+    if (image.empty()) {
+        fail("Failed to load image");
+        return;
+    }
+
+    const bool remove = m_state.process_options.remove_mode;
+    const auto force_size = m_state.process_options.force_size;
+    const auto variant = m_state.process_options.variant();
+
+    // Confidence gate (only when removing and detection is enabled).
+    if (remove && m_state.batch.use_detection) {
+        try {
+            DetectionResult det = m_engine->detect_watermark(image, force_size, variant);
+            result.confidence = det.confidence;
+            const bool ncc_passes =
+                det.detected || det.confidence >= m_state.batch.detection_threshold;
+            if (!ncc_passes) {
+                result.status = BatchFileStatus::Skipped;
+                result.message = fmt::format("No watermark detected ({:.0f}%), skipped",
+                                             det.confidence * 100.0f);
+                spdlog::info("Batch: {}: {}", input.filename(), result.message);
+                return;
+            }
+        } catch (const std::exception& e) {
+            fail(std::string("Detect error: ") + e.what());
+            return;
+        }
+    }
+
+    // Remove / Add (mirrors process_current; batch always uses Standard mode,
+    // never Custom -- there is no per-file user-drawn region in batch).
+    try {
+        if (remove) {
+            m_engine->remove_watermark(image, force_size, variant);
+        } else {
+            m_engine->add_watermark(image, force_size);
+        }
+    } catch (const std::exception& e) {
+        fail(std::string("Process error: ") + e.what());
+        return;
+    }
+
+    // Inpaint cleanup -- same options the single-image GUI applies. The
+    // user controls this via the Custom-mode inpaint checkbox; batch
+    // honours whatever the user last set.
+    if (remove) {
+        const auto& inpaint_opts = m_state.process_options.inpaint;
+        if (inpaint_opts.enabled && inpaint_opts.strength > 0.001f) {
+            auto config = get_watermark_config(image.cols, image.rows, variant);
+            auto pos = config.get_position(image.cols, image.rows);
+            cv::Rect inpaint_region(pos.x, pos.y, config.logo_size, config.logo_size);
+
+            try {
+#ifdef GWT_HAS_AI_DENOISE
+                if (inpaint_opts.method == InpaintMethod::AI_DENOISE && m_denoiser) {
+                    const auto& alpha = m_engine->get_alpha_map(
+                        WatermarkSize::Large, variant);
+                    m_denoiser->denoise(
+                        image, inpaint_region, alpha,
+                        inpaint_opts.ai_sigma, inpaint_opts.strength,
+                        InpaintOptions::kPadding);
+                } else
+#endif
+                {
+                    m_engine->inpaint_residual(
+                        image, inpaint_region,
+                        inpaint_opts.strength, inpaint_opts.method,
+                        inpaint_opts.inpaint_radius,
+                        InpaintOptions::kPadding);
+                }
+            } catch (const std::exception& e) {
+                fail(std::string("Inpaint error: ") + e.what());
+                return;
+            }
+        }
+    }
+
+    // Write back -- overwrite original.
+    std::string ext = input.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(),
+                   [](unsigned char c){ return std::tolower(c); });
+    bool write_ok = false;
+    try {
+        if (ext == ".png") {
+            write_ok = write_png(input, image, 6);
+        } else {
+            std::vector<int> params;
+            if (ext == ".jpg" || ext == ".jpeg") {
+                params = {cv::IMWRITE_JPEG_QUALITY, 100};
+            } else if (ext == ".webp") {
+                params = {cv::IMWRITE_WEBP_QUALITY, 101};
+            }
+            write_ok = cv::imwrite(input.string(), image, params);
+        }
+    } catch (const std::exception& e) {
+        fail(std::string("Write error: ") + e.what());
+        return;
+    }
+    if (!write_ok) {
+        fail("Failed to write image");
+        return;
+    }
+
+    result.status = BatchFileStatus::OK;
+    result.message = remove ? "Watermark removed" : "Watermark added";
+    spdlog::info("Batch: {}: {} (conf={:.0f}%)",
+                 input.filename(), result.message, result.confidence * 100.0f);
 }
 
 // =============================================================================
@@ -856,24 +986,38 @@ void AppController::update_watermark_info() {
     }
 
     // Standard mode: Use forced size or auto-detect
+    const WatermarkVariant variant = m_state.process_options.variant();
     WatermarkSize size = m_state.process_options.force_size.value_or(
         get_watermark_size(w, h)
     );
 
-    WatermarkPosition config = get_watermark_config(w, h);
+    WatermarkPosition config = get_watermark_config(w, h, variant);
     if (m_state.process_options.force_size) {
-        // Override config based on forced size
-        if (size == WatermarkSize::Small) {
-            config = WatermarkPosition{32, 32, 48};
-        } else {
-            config = WatermarkPosition{64, 64, 96};
-        }
+        // Override config based on forced size, using the active profile's
+        // small/large canonical dimensions.
+        config = get_watermark_config(
+            size == WatermarkSize::Small ? 1024 : 2048,
+            size == WatermarkSize::Small ? 1024 : 2048,
+            variant
+        );
     }
 
     cv::Point pos = config.get_position(w, h);
 
+    // For the V2 small profile the actual watermark position varies by a
+    // few pixels with the source aspect ratio. Run detection so the on-
+    // screen highlight matches what the engine will actually use.
+    if (variant == WatermarkVariant::V2 && size == WatermarkSize::Small &&
+        m_state.image.has_image()) {
+        const DetectionResult det = m_engine->detect_watermark(
+            m_state.image.original, size, variant);
+        pos.x = det.region.x;
+        pos.y = det.region.y;
+    }
+
     WatermarkInfo info;
     info.size = size;
+    info.variant = variant;
     info.position = pos;
     info.region = cv::Rect(pos.x, pos.y, config.logo_size, config.logo_size);
     info.is_custom = false;

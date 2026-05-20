@@ -115,6 +115,14 @@ public:
     void set_size_mode(WatermarkSizeMode mode);
 
     /**
+     * Set legacy profile mode.
+     * @param legacy  true = use the legacy Gemini profile (small=48, large=96
+     *                       at the legacy margin); false = use the current
+     *                       profile (small=36, large=96 at the current margin).
+     */
+    void set_legacy_mode(bool legacy);
+
+    /**
      * Set custom watermark region
      * @param region  The custom region in image pixel coordinates
      */
@@ -248,6 +256,10 @@ private:
 
     // Batch helpers
     void generate_thumbnail_atlas();
+
+    // Run the full GUI pipeline (detect -> remove -> inpaint -> save) on one
+    // file in batch mode, writing status/confidence/message back into result.
+    void process_batch_file(BatchFileResult& result);
 };
 
 }  // namespace gwt::gui

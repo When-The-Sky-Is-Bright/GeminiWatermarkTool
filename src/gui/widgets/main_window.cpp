@@ -556,17 +556,31 @@ void MainWindow::render_control_panel() {
     ImGui::Text("Watermark Size");
     ImGui::Separator();
 
-    // Size selection using WatermarkSizeMode
     auto& opts = state.process_options;
+
+    // Legacy profile toggle. Off (default) targets the current Gemini
+    // profile (96 large / 36 small); on covers older outputs where the
+    // small watermark is 48 px and the margin is 32 px.
+    bool legacy = opts.legacy_mode;
+    if (ImGui::Checkbox("Legacy (pre-Gemini 3.5)", &legacy)) {
+        m_controller.set_legacy_mode(legacy);
+    }
+
     int size_option = static_cast<int>(opts.size_mode);
+    const int small_px = opts.legacy_mode ? 48 : 36;
 
     if (ImGui::RadioButton("Auto Detect", size_option == 0)) {
         m_controller.set_size_mode(WatermarkSizeMode::Auto);
     }
-    if (ImGui::RadioButton("48x48 (Small)", size_option == 1)) {
-        m_controller.set_size_mode(WatermarkSizeMode::Small);
+    {
+        char small_label[32];
+        std::snprintf(small_label, sizeof(small_label),
+                      "Small (%dx%d)", small_px, small_px);
+        if (ImGui::RadioButton(small_label, size_option == 1)) {
+            m_controller.set_size_mode(WatermarkSizeMode::Small);
+        }
     }
-    if (ImGui::RadioButton("96x96 (Large)", size_option == 2)) {
+    if (ImGui::RadioButton("Large (96x96)", size_option == 2)) {
         m_controller.set_size_mode(WatermarkSizeMode::Large);
     }
     // Custom mode is not available in batch mode
@@ -1063,8 +1077,9 @@ void MainWindow::render_batch_confirm_dialog() {
 
         // Size mode
         const char* size_label = "Auto";
+        const char* small_size_label = state.process_options.legacy_mode ? "48x48" : "36x36";
         switch (state.process_options.size_mode) {
-            case WatermarkSizeMode::Small:  size_label = "48x48"; break;
+            case WatermarkSizeMode::Small:  size_label = small_size_label; break;
             case WatermarkSizeMode::Large:  size_label = "96x96"; break;
             case WatermarkSizeMode::Custom: size_label = "Custom (auto-detect per image)"; break;
             default: break;

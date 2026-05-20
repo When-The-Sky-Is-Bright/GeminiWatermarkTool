@@ -54,8 +54,8 @@ enum class ProcessState {
  */
 enum class WatermarkSizeMode {
     Auto,       // Auto-detect based on image dimensions
-    Small,      // Force 48x48
-    Large,      // Force 96x96
+    Small,      // Force small canonical size (V2: 36, legacy: 48)
+    Large,      // Force large canonical size (96)
     Custom      // User-defined region
 };
 
@@ -155,13 +155,15 @@ struct CustomWatermarkState {
  */
 struct WatermarkInfo {
     WatermarkSize size{WatermarkSize::Small};
+    WatermarkVariant variant{WatermarkVariant::V2};
     cv::Point position{0, 0};       // Top-left corner
     cv::Rect region{0, 0, 0, 0};    // Full watermark region
     bool is_custom{false};           // Whether this is a custom region
 
     [[nodiscard]] int width() const noexcept {
         if (is_custom) return region.width;
-        return (size == WatermarkSize::Small) ? 48 : 96;
+        if (size == WatermarkSize::Large) return 96;
+        return (variant == WatermarkVariant::V1) ? 48 : 36;
     }
 
     [[nodiscard]] int height() const noexcept {
@@ -227,10 +229,15 @@ struct InpaintOptions {
  */
 struct ProcessOptions {
     bool remove_mode{true};     // true = remove, false = add
+    bool legacy_mode{false};    // false = V2 (current Gemini), true = V1 (legacy Gemini)
     WatermarkSizeMode size_mode{WatermarkSizeMode::Auto};
     std::optional<WatermarkSize> force_size;  // Override auto-detection (for Auto/Small/Large)
     std::optional<cv::Rect> custom_region;    // Custom watermark region
     InpaintOptions inpaint;                   // Inpaint cleanup options
+
+    [[nodiscard]] WatermarkVariant variant() const noexcept {
+        return legacy_mode ? WatermarkVariant::V1 : WatermarkVariant::V2;
+    }
 };
 
 // =============================================================================
