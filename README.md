@@ -7,6 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![GitHub Stars](https://img.shields.io/github/stars/allenk/GeminiWatermarkTool?style=social)](https://github.com/allenk/GeminiWatermarkTool)
 [![Support on Ko-fi](https://img.shields.io/badge/Support-Ko--fi-FF5E5B?logo=ko-fi&logoColor=white)](https://ko-fi.com/allenkoss)
+[![Support via PayPal](https://img.shields.io/badge/Support-PayPal-00457C?logo=paypal&logoColor=white)](https://paypal.me/allenkoss)
 
 🆕 **Gemini 3.5 watermark profile supported, with automatic legacy fallback** (v0.3.1) — the CLI tries the current Gemini 3.5+ profile first; if detection skips, it automatically retries with the legacy (pre-3.5) profile. Disable with `--no-legacy`, or pin legacy directly with `--legacy`. [Details below](#-gemini-35-support--new).
 
@@ -900,7 +901,7 @@ The author does not condone or encourage the misuse of this tool for copyright i
 
 ## ❤️ Support This Project
 
-If GeminiWatermarkTool saved you time and you'd like to help keep it going, you can [support on Ko-fi](https://ko-fi.com/allenkoss). Every public release goes through GitHub Actions CI on Windows / Linux / macOS / Android, and the binaries live in the Releases section — small contributions help cover runner minutes and storage so the project can keep building cross-platform binaries for free. Not required, just appreciated.
+If GeminiWatermarkTool saved you time and you'd like to help keep it going, you can support via [Ko-fi](https://ko-fi.com/allenkoss) or [PayPal](https://paypal.me/allenkoss) — both go to the same place; pick whichever works for you (a few users have reported Ko-fi checkout issues from their region, so PayPal is the dependable fallback). Every public release goes through GitHub Actions CI on Windows / Linux / macOS / Android, and the binaries live in the Releases section — small contributions help cover runner minutes and storage so the project can keep building cross-platform binaries for free. Not required, just appreciated.
 
 Bug reports, sample images / videos, and pull requests remain the most valuable contributions and always will be — opening an [issue](https://github.com/allenk/GeminiWatermarkTool/issues) with content the tool can't handle is often more useful than a one-off donation.
 
